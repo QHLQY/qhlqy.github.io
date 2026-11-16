@@ -39,6 +39,8 @@ DEFAULT_CONFIG = {
         "dark_overlay_color": "#121212",
     },
     "contact": {
+        "github": "",
+        "email": "",
         "qq": "",
         "wechat": "",
         "bilibili": "",
