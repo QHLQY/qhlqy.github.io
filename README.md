@@ -84,13 +84,15 @@ HOMEPAGE_OFFLINE=1 python build_static.py
 
 ## 部署
 
-推送代码到 `main` 分支、手动触发，或等待每日定时任务，`.github/workflows/build-deploy.yml` 会：
+推荐使用 GitHub Actions：
 
-1. 安装依赖；
-2. 运行 `build_static.py` 生成 `output/`；
-3. 将 `output/` 作为 Pages 产物发布。
+1. 在 **Settings → Pages → Build and deployment** 将 **Source** 设为 **GitHub Actions**；
+2. 推送代码到 `main`、手动触发，或等待每日定时任务，`.github/workflows/build-deploy.yml` 会：
+   - 安装依赖；
+   - 运行 `build_static.py` 生成 `output/`；
+   - 将 `output/` 作为 Pages 产物发布。
 
-> 仓库的 Pages 发布源需设置为 **GitHub Actions**（Settings → Pages → Build and deployment → Source: GitHub Actions）。
+如果 Pages 的 Source 是「Deploy from a branch（main / root）」，仓库根目录的 `index.html` 会作为页面直接提供；此时需要手动把 `output/index.html` 覆盖到根目录并提交，页面数据才会更新。建议切换到 GitHub Actions 以获得每日自动更新。
 
 自定义域名通过仓库根目录的 `CNAME` 文件维护。
 
