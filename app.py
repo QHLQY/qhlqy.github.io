@@ -1,370 +1,349 @@
-import os
+"""基于 Flask 的个人主页应用。
+
+启动时会读取 config.json（缺失则回退到 default/default_config.json 或内置默认配置），
+再通过 GitHub API 获取用户信息并渲染 templates/index.html。
+"""
+
 import json
-import yaml
+import os
+import shutil
+import time
+from datetime import datetime
+
 import markdown
 import requests
-import os
-import sys
-from flask import Flask, render_template, jsonify, send_from_directory, abort
-from datetime import datetime
-from flask import Flask, render_template_string
-import jinja2
-import shutil
+from flask import Flask, abort, jsonify, render_template, send_from_directory
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, 'default', 'default_config.json')
+
+DEFAULT_CONFIG = {
+    "github_url": "https://github.com/example",
+    "dark_mode": "auto",
+    "name": "Example User",
+    "bio": "Python Developer",
+    "introduction_file": "Introduction.md",
+    "github_token": "",
+    "theme": {
+        "primary_color": "#6a11cb",
+        "secondary_color": "#2575fc",
+        "dark_primary_color": "#a855f7",
+        "dark_secondary_color": "#60a5fa",
+    },
+    "background": {
+        "image": "background.jpg",
+        "blur": 8,
+        "overlay_opacity": 0.6,
+        "overlay_color": "#f3f4f6",
+        "dark_overlay_color": "#121212",
+    },
+    "contact": {
+        "qq": "",
+        "wechat": "",
+        "bilibili": "",
+        "douyin": "",
+        "xiaohongshu": "",
+    },
+}
+
+
+def _deep_merge(base, override):
+    """递归合并配置，override 中的值优先，缺失的键使用 base 的值。"""
+    result = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config():
+    """读取配置文件，缺失时依次回退到默认配置文件与内置默认值。"""
+    if not os.path.exists(CONFIG_PATH) and os.path.exists(DEFAULT_CONFIG_PATH):
+        print(f"config.json 不存在，从 {DEFAULT_CONFIG_PATH} 复制默认配置")
+        shutil.copy2(DEFAULT_CONFIG_PATH, CONFIG_PATH)
+
+        default_background = DEFAULT_CONFIG['background']['image']
+        if not os.path.exists(os.path.join(BASE_DIR, default_background)):
+            source = os.path.join(BASE_DIR, 'default', default_background)
+            if os.path.exists(source):
+                shutil.copy2(source, os.path.join(BASE_DIR, default_background))
+
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"读取 config.json 失败，使用默认配置: {exc}")
+            user_config = {}
+    else:
+        print("未找到 config.json，使用内置默认配置")
+        user_config = {}
+
+    merged = _deep_merge(DEFAULT_CONFIG, user_config)
+
+    # 确保背景图存在，缺失时尝试从 default/ 复制
+    background = merged['background']['image']
+    background_abs = os.path.join(BASE_DIR, background)
+    if not os.path.exists(background_abs):
+        fallback = os.path.join(BASE_DIR, 'default', os.path.basename(background))
+        if os.path.exists(fallback):
+            shutil.copy2(fallback, background_abs)
+            print(f"{background} 不存在，已从 default/ 复制")
+
+    return merged
+
+
+config = load_config()
 
 app = Flask(__name__)
+app.config['theme'] = config['theme']
+app.config['dark_mode'] = config['dark_mode']
 
-# 导入必要的库
-import time
+GITHUB_API = 'https://api.github.com'
+REQUEST_TIMEOUT = 8
 
-# 读取配置文件
-@app.before_first_request
-def load_config():
-    global config
-    try:
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        # 如果config.json不存在，尝试从default文件夹复制
-        default_config_path = os.path.join('default', 'default_config.json')
-        if os.path.exists(default_config_path):
-            print(f"config.json不存在，从{default_config_path}复制默认配置")
-            shutil.copy2(default_config_path, 'config.json')
-            # 读取复制过来的配置
-            with open('config.json', 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            
-            # 同时检查background.jpg是否存在，如果不存在也从default文件夹复制
-            if 'background' in config and 'image' in config['background']:
-                background_image = config['background']['image']
-                if not os.path.exists(background_image) and os.path.exists(os.path.join('default', background_image)):
-                    print(f"{background_image}不存在，从default文件夹复制")
-                    shutil.copy2(os.path.join('default', background_image), background_image)
-        else:
-            # 如果default_config.json也不存在，使用内置默认配置
-            print("default/default_config.json不存在，使用内置默认配置")
-            config = {
-                "github_url": "https://github.com/example",
-                "dark_mode": "auto",
-                "name": "Example User",
-                "bio": "Python Developer",
-                "introduction_file": "Introduction.md",
-                "github_token": "",  # 添加GitHub令牌配置项
-                "theme": {
-                    "primary_color": "#6a11cb",
-                    "secondary_color": "#2575fc"
-                },
-                "background": {
-                    "image": "background.png",
-                    "blur": 8,
-                    "overlay_opacity": 0.6,
-                    "overlay_color": "#121212"
-                }
-            }
-            # 保存默认配置
-            with open('config.json', 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
 
-# 创建通用的GitHub API请求函数
-def make_github_request(url, timeout=5):
-    try:
-        # 配置requests不验证SSL证书（解决本地环境中的证书验证问题）
-        import ssl
-        ssl._create_default_https_context = ssl._create_unverified_context
-        
-        # 准备请求头
-        headers = {'Accept': 'application/vnd.github.v3+json'}
-        github_token = ''
-        
-        # 首先尝试从github_token.txt文件中读取令牌
-        token_file = os.path.join(app.root_path, 'github_token.txt')
+def _github_token():
+    """按 环境变量 -> github_token.txt -> config.json 的顺序读取令牌。"""
+    token = os.environ.get('GITHUB_TOKEN', '').strip()
+    if token:
+        return token
+
+    token_file = os.path.join(BASE_DIR, 'github_token.txt')
+    if os.path.exists(token_file):
         try:
-            if os.path.exists(token_file):
-                with open(token_file, 'r', encoding='utf-8') as f:
-                    github_token = f.read().strip()
-                # 移除可能的空白字符和引号
-                github_token = github_token.replace('"', '').replace("'", '')
-                print(f"从github_token.txt文件中读取令牌成功")
-            else:
-                # 如果文件不存在，尝试从配置中获取
-                github_token = config.get('github_token', '')
-                print("github_token.txt文件不存在，尝试从配置中获取令牌")
-        except Exception as e:
-            print(f"读取GitHub令牌时出错: {e}")
-            # 出错时，尝试从配置中获取
-            github_token = config.get('github_token', '')
-        
-        # 如果配置了GitHub令牌，添加到请求头
-        if github_token:
-            headers['Authorization'] = f'token {github_token}'
-            print(f"使用GitHub令牌进行认证")
-        else:
-            print("未使用GitHub令牌，使用匿名访问")
-        
-        # 发送请求
-        response = requests.get(url, headers=headers, timeout=timeout, verify=False)
-        print(f"GitHub API请求: {url}, 状态码: {response.status_code}")
-        
-        # 检查是否达到速率限制
-        if response.status_code == 403 and 'rate limit' in response.text.lower():
-            print("GitHub API速率限制已达，建议配置GitHub令牌")
-        
-        return response
-    except Exception as e:
-        print(f"GitHub API请求异常: {e}")
-        # 创建一个模拟的响应对象
-        class MockResponse:
-            def __init__(self):
-                self.status_code = 500
-                self.text = "模拟错误响应"
-        return MockResponse()
+            with open(token_file, 'r', encoding='utf-8') as f:
+                return f.read().strip().strip('"').strip("'")
+        except OSError as exc:
+            print(f"读取 github_token.txt 失败: {exc}")
 
-# 从 GitHub API 获取用户信息
-def get_github_user_info():
-    print("开始获取GitHub用户信息")
-    github_url = config.get('github_url', 'https://github.com/example')
-    username = github_url.rstrip('/').split('/')[-1]
-    print(f"配置的GitHub URL: {github_url}")
-    print(f"提取的用户名: {username}")
+    return str(config.get('github_token') or '').strip()
+
+
+class _FailedResponse:
+    """请求异常时的占位响应，避免调用方处理 None。"""
+
+    status_code = 0
+    text = ''
+
+    def json(self):
+        return {}
+
+
+def github_request(url, timeout=REQUEST_TIMEOUT):
+    """带认证与错误处理的 GitHub API 请求。"""
+    headers = {
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'qhlqy-homepage',
+    }
+    token = _github_token()
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+
+    # 默认校验 HTTPS 证书；本地证书异常时可设置 GITHUB_INSECURE=1 临时关闭校验
+    verify = os.environ.get('GITHUB_INSECURE') != '1'
 
     try:
-        print(f"准备请求GitHub API: https://api.github.com/users/{username}")
-        
-        # 获取用户信息
-        user_response = make_github_request(f'https://api.github.com/users/{username}')
-        print(f"GitHub API响应状态码: {user_response.status_code}")
+        response = requests.get(url, headers=headers, timeout=timeout, verify=verify)
+    except requests.RequestException as exc:
+        print(f"GitHub API 请求异常: {exc}")
+        return _FailedResponse()
 
-        if user_response.status_code == 200:
-            user_data = user_response.json()
-            print(f"成功获取用户数据: {user_data.get('name')}, {user_data.get('login')}")
+    if response.status_code == 403 and 'rate limit' in response.text.lower():
+        print("GitHub API 速率限制已达，建议配置 GITHUB_TOKEN 环境变量")
 
-            # 获取用户的仓库信息
-            repos_response = make_github_request(f'https://api.github.com/users/{username}/repos?sort=pushed&per_page=100')
-            if repos_response.status_code == 200:
-                repos = repos_response.json()
+    return response
 
-                # 获取总仓库数和总 stars 数
-                total_repos = len(repos)
-                total_stars = sum(repo.get('stargazers_count', 0) for repo in repos)
 
-                # 获取同名仓库的 README
-                readme_content = get_readme_content(username)
+def get_username():
+    """从配置的 GitHub 主页地址中提取用户名。"""
+    github_url = str(config.get('github_url', '')).rstrip('/')
+    username = github_url.rsplit('/', 1)[-1]
+    if username.endswith('.git'):
+        username = username[:-4]
+    return username or 'example'
 
-                # 获取最近有推送的 5 个仓库
-                recent_repos = sorted(repos, key=lambda x: x.get('pushed_at', ''), reverse=True)[:5]
 
-                # 获取用户的活动数据（过去12个月的提交统计）
-                # 传递已获取的repos参数，避免重复获取
-                activity_data = get_github_activity_data(username, repos)
+def get_github_user_info():
+    """获取用户信息、仓库、活动与技术栈数据，失败时返回兜底数据。"""
+    if os.environ.get('HOMEPAGE_OFFLINE') == '1':
+        print("HOMEPAGE_OFFLINE=1，跳过 GitHub API 请求")
+        return _fallback_user_info()
 
-                # 分析用户的技术栈
-                tech_stack = analyze_tech_stack(repos)
+    username = get_username()
+    print(f"开始获取 GitHub 用户信息: {username}")
 
-                return {
-                    "avatar_url": user_data.get('avatar_url'),
-                    "name": user_data.get('name') or username,
-                    "bio": config.get('bio', 'Python Developer'),  # 使用配置文件中的bio
-                    "total_repos": total_repos,
-                    "total_stars": total_stars,
-                    "readme_content": readme_content,
-                    "recent_repos": recent_repos,
-                    "activity_data": activity_data,
-                    "tech_stack": tech_stack
-                }
-    except Exception as e:
-        print(f"GitHub API调用异常: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
-    # 如果获取失败，返回默认值
+    try:
+        user_response = github_request(f'{GITHUB_API}/users/{username}')
+        if user_response.status_code != 200:
+            print(f"获取用户信息失败，状态码: {user_response.status_code}")
+            return _fallback_user_info()
+
+        user_data = user_response.json()
+
+        repos_response = github_request(
+            f'{GITHUB_API}/users/{username}/repos?sort=pushed&per_page=100'
+        )
+        if repos_response.status_code != 200:
+            print(f"获取仓库列表失败，状态码: {repos_response.status_code}")
+            return _fallback_user_info()
+
+        repos = repos_response.json()
+        # /users/{user}/repos 最多返回 100 个，总数优先使用用户资料中的 public_repos
+        total_repos = user_data.get('public_repos', len(repos))
+        total_stars = sum(repo.get('stargazers_count', 0) for repo in repos)
+        recent_repos = sorted(
+            repos, key=lambda repo: repo.get('pushed_at', ''), reverse=True
+        )[:5]
+
+        return {
+            "avatar_url": user_data.get('avatar_url'),
+            "name": user_data.get('name') or user_data.get('login') or username,
+            "bio": config.get('bio', ''),
+            "total_repos": total_repos,
+            "total_stars": total_stars,
+            "readme_content": get_readme_content(username),
+            "recent_repos": recent_repos,
+            "activity_data": get_github_activity_data(username),
+            "tech_stack": analyze_tech_stack(repos),
+        }
+    except Exception as exc:  # noqa: BLE001 - 外部服务异常不应导致页面 500
+        print(f"GitHub API 调用异常: {type(exc).__name__}: {exc}")
+        return _fallback_user_info()
+
+
+def _fallback_user_info():
     return {
         "avatar_url": "https://avatars.githubusercontent.com/u/1000000?v=4",
         "name": config.get('name', 'Example User'),
-        "bio": config.get('bio', 'Python Developer'),
+        "bio": config.get('bio', ''),
         "total_repos": 0,
         "total_stars": 0,
         "readme_content": get_local_readme(),
         "recent_repos": [],
-        "activity_data": [65, 59, 80, 81, 56, 55, 70, 65, 85, 75, 60, 75],  # 默认数据
+        "activity_data": [65, 59, 80, 81, 56, 55, 70, 65, 85, 75, 60, 75],
         "tech_stack": [
             {"name": "Python", "color": "#6a11cb"},
             {"name": "JavaScript", "color": "#2575fc"},
             {"name": "HTML/CSS", "color": "#560bad"},
-            {"name": "Flask", "color": "#1e40af"}
-        ]
+            {"name": "Flask", "color": "#1e40af"},
+        ],
     }
 
-import requests
-from datetime import datetime, timedelta
 
-def get_github_activity_data(username, token=None):
-    """
-    获取 GitHub 用户过去 12 个月的活跃度（已去重并修正月份逻辑）
-    """
-    headers = {'Authorization': f'token {token}'} if token else {}
+def get_github_activity_data(username):
+    """统计过去 12 个月的提交活动（GitHub Events 最多保留 90 天）。"""
     now = datetime.now()
-    # 索引 0 是 11 个月前，索引 11 是当前月
     activity_counts = [0] * 12
-    
-    # 辅助函数：计算日期属于 activity_counts 的哪个索引
+
     def get_month_index(dt):
         diff = (now.year - dt.year) * 12 + (now.month - dt.month)
-        if 0 <= diff < 12:
-            return 11 - diff  # 转换为 0 (最旧) 到 11 (最新)
-        return None
+        return 11 - diff if 0 <= diff < 12 else None
 
     try:
-        # 1. 优先获取 Events API (涵盖了大部分动态)
-        # 注意：GitHub Events 仅保留 90 天内的数据
-        events_url = f"https://api.github.com/users/{username}/events/public?per_page=100"
-        response = requests.get(events_url, headers=headers)
-        
-        if response.status_code == 200:
-            events = response.json()
-            for event in events:
-                if event['type'] == 'PushEvent':
-                    created_at = datetime.strptime(event['created_at'], '%Y-%m-%dT%H:%M:%SZ')
-                    idx = get_month_index(created_at)
-                    if idx is not None:
-                        # PushEvent 中的 size 代表该次推送包含的 commit 数量
-                        commit_count = event.get('payload', {}).get('size', 1)
-                        activity_counts[idx] += commit_count
+        seen_events = set()
+        for page in range(1, 4):
+            response = github_request(
+                f'{GITHUB_API}/users/{username}/events/public'
+                f'?per_page=100&page={page}'
+            )
+            if response.status_code != 200:
+                break
 
-        # 2. 只有当 Events 数据不足以覆盖 12 个月时，才按需查询 Repo Commits
-        # 这里为了防止重复，我们只统计 Events 覆盖不到的更早日期
-        # (篇幅原因简化处理：建议只针对特定重要仓库进行回溯)
-        
-        # 检查是否全为 0，如果是则返回兜底数据
+            events = response.json()
+            if not events:
+                break
+
+            for event in events:
+                event_id = event.get('id')
+                if event_id in seen_events:
+                    continue
+                seen_events.add(event_id)
+
+                if event.get('type') != 'PushEvent':
+                    continue
+
+                created_at = event.get('created_at', '')
+                try:
+                    created = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
+                except ValueError:
+                    continue
+
+                index = get_month_index(created)
+                if index is not None:
+                    activity_counts[index] += event.get('payload', {}).get('size', 1)
+
+            if len(events) < 100:
+                break
+
         if sum(activity_counts) == 0:
             return [45, 52, 38, 65, 48, 56, 70, 80, 85, 75, 60, 75]
 
         return activity_counts
-
-    except Exception as e:
-        print(f"Error fetching data: {e}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"获取活动数据失败: {exc}")
         return [0] * 12
-    
-# 分析用户的技术栈
-# 限制处理的仓库数量，优化性能
+
+
+# 技术栈缓存（默认 1 小时）
 cached_tech_stack = None
 cached_timestamp = 0
+CACHE_DURATION = 3600
 
-CACHE_DURATION = 3600  # 缓存1小时
+
 def analyze_tech_stack(repos):
+    """根据仓库语言统计生成技术栈标签，并缓存结果。"""
     global cached_tech_stack, cached_timestamp
-    
-    # 检查缓存是否有效（如果启用了缓存）
+
     current_time = time.time()
     if cached_tech_stack and (current_time - cached_timestamp < CACHE_DURATION):
-        print("使用缓存的技术栈数据")
         return cached_tech_stack
-    
-    try:
-        print("开始分析用户的技术栈")
-        
-        # 创建语言统计字典
-        language_stats = {}
-        total_bytes = 0
-        
-        # 限制处理的仓库数量，只处理最近活跃的前10个仓库
-        if len(repos) > 10:
-            repos = repos[:10]
-        
-        # 遍历仓库，统计语言使用情况
-        for repo in repos:
-            # 获取仓库的语言信息（先尝试从仓库数据中获取，减少API调用）
-            if 'language' in repo and repo['language']:
-                lang = repo['language']
-                if lang not in language_stats:
-                    language_stats[lang] = 1  # 给主要语言一个基础分
-                else:
-                    language_stats[lang] += 1  # 增加主要语言的权重
-                    
-            # 仅对前几个重要的仓库进行详细的语言统计
-            if len(language_stats) < 5 and 'languages_url' in repo:
-                try:
-                    languages_response = make_github_request(repo['languages_url'])
-                    
-                    if languages_response.status_code == 200:
-                        languages_data = languages_response.json()
-                        
-                        # 更新语言统计
-                        for lang, bytes_count in languages_data.items():
-                            if lang not in language_stats:
-                                language_stats[lang] = 0
-                            language_stats[lang] += bytes_count
-                            total_bytes += bytes_count
-                except Exception as e:
-                    print(f"获取仓库 {repo['name']} 的语言信息时出错: {e}")
-                    continue
-            
 
-        
-        # 如果没有获取到语言数据，返回默认技术栈
+    try:
+        language_stats = {}
+
+        # 只分析最近活跃的 10 个仓库，控制 API 调用次数
+        for repo in repos[:10]:
+            language = repo.get('language')
+            if language:
+                language_stats[language] = language_stats.get(language, 0) + 1
+
+            if len(language_stats) < 5 and repo.get('languages_url'):
+                languages_response = github_request(repo['languages_url'])
+                if languages_response.status_code == 200:
+                    for language, byte_count in languages_response.json().items():
+                        language_stats[language] = language_stats.get(language, 0) + byte_count
+
         if not language_stats:
-            print("没有获取到语言数据，返回默认技术栈")
-            # 更新缓存
-            cached_tech_stack = [
-                {"name": "Python", "color": "#6a11cb"},
-                {"name": "JavaScript", "color": "#2575fc"},
-                {"name": "HTML/CSS", "color": "#560bad"},
-                {"name": "Flask", "color": "#1e40af"}
-            ]
+            cached_tech_stack = list(_fallback_user_info()['tech_stack'])
             cached_timestamp = time.time()
             return cached_tech_stack
-        
-        # 计算每种语言的使用比例
-        language_ratios = {}
-        for lang, bytes_count in language_stats.items():
-            # 考虑仓库数量和代码量的权重
-            language_ratios[lang] = bytes_count
-        
-        # 按使用比例排序，取前10种语言
-        sorted_languages = sorted(language_ratios.items(), key=lambda x: x[1], reverse=True)[:10]
-        
-        # 获取配置中的主题色
-        from flask import current_app
-        theme = current_app.config.get('theme', {
-            'primary_color': '#6a11cb',
-            'secondary_color': '#2575fc',
-            'dark_primary_color': '#a855f7',
-            'dark_secondary_color': '#60a5fa'
-        })
-        
-        # 根据主题色生成和谐的标签颜色
-        def generate_harmonious_color(base_color, index, is_dark=False):
-            # 简单的颜色变体生成算法
-            # 将HEX颜色转换为RGB
-            hex_color = base_color.lstrip('#')
-            r = int(hex_color[0:2], 16)
-            g = int(hex_color[2:4], 16)
-            b = int(hex_color[4:6], 16)
-            
-            # 根据索引调整颜色亮度和饱和度
-            factor = 1.0 - (index * 0.15)  # 递减因子
-            if factor < 0.4:
-                factor = 0.4  # 确保颜色不会太暗
-                
-            # 考虑暗色模式调整
-            if is_dark:
-                # 在暗色模式下，使用较亮的颜色变体
-                factor = 0.6 + (index * 0.1)  # 递增因子，确保至少有一定亮度
-                if factor > 0.9:
-                    factor = 0.9  # 避免颜色过亮
-            
-            # 应用调整
-            r = int(r * factor)
-            g = int(g * factor)
-            b = int(b * factor)
-            
-            # 转换回HEX
-            return f'#{r:02x}{g:02x}{b:02x}'
-        
-        # 检查是否为暗色模式
-        is_dark = current_app.config.get('dark_mode', 'auto') == 'dark'
+
+        sorted_languages = sorted(
+            language_stats.items(), key=lambda item: item[1], reverse=True
+        )[:10]
+
+        theme = app.config.get('theme', DEFAULT_CONFIG['theme'])
+        is_dark = app.config.get('dark_mode', 'auto') == 'dark'
         if is_dark:
             base_colors = [theme['dark_primary_color'], theme['dark_secondary_color']]
         else:
             base_colors = [theme['primary_color'], theme['secondary_color']]
+
+        def generate_harmonious_color(base_color, index, dark=False):
+            hex_color = base_color.lstrip('#')
+            r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+            factor = 1.0 - index * 0.15
+            if factor < 0.4:
+                factor = 0.4
+            if dark:
+                factor = min(0.9, 0.6 + index * 0.1)
+            return f'#{int(r * factor):02x}{int(g * factor):02x}{int(b * factor):02x}'
+
         color_map = {
             'Python': generate_harmonious_color(base_colors[0], 0, is_dark),
             'JavaScript': generate_harmonious_color(base_colors[1], 0, is_dark),
@@ -388,322 +367,121 @@ def analyze_tech_stack(repos):
             'React': generate_harmonious_color(base_colors[1], 9, is_dark),
             'Vue': generate_harmonious_color(base_colors[0], 10, is_dark),
             'Angular': generate_harmonious_color(base_colors[1], 10, is_dark),
-            'Node.js': generate_harmonious_color(base_colors[0], 11, is_dark)
+            'Node.js': generate_harmonious_color(base_colors[0], 11, is_dark),
         }
-        
-        # 创建技术栈列表
+
         tech_stack = []
-        for lang, _ in sorted_languages:
-            # 特殊处理HTML和CSS，合并为HTML/CSS
-            if lang == 'HTML' or lang == 'CSS':
-                # 检查是否已经添加了HTML/CSS
-                html_css_exists = False
-                for tech in tech_stack:
-                    if tech['name'] == 'HTML/CSS':
-                        html_css_exists = True
-                        break
-                if not html_css_exists:
+        html_css_added = False
+
+        for language, _ in sorted_languages:
+            if language in ('HTML', 'CSS', 'SCSS', 'Less', 'Sass'):
+                if not html_css_added:
                     tech_stack.append({
                         "name": "HTML/CSS",
-                        "color": color_map.get('HTML', 'orange')
+                        "color": color_map.get('HTML', 'orange'),
                     })
+                    html_css_added = True
             else:
-                # 添加其他语言
                 tech_stack.append({
-                    "name": lang,
-                    "color": color_map.get(lang, 'gray')  # 默认灰色
+                    "name": language,
+                    "color": color_map.get(language, 'gray'),
                 })
-        
-        # 如果没有HTML/CSS但有SCSS或Less等，也添加HTML/CSS
-        html_css_exists = False
-        for tech in tech_stack:
-            if tech['name'] == 'HTML/CSS':
-                html_css_exists = True
-                break
-        
-        if not html_css_exists:
-            for lang, _ in sorted_languages:
-                if lang in ['SCSS', 'Less', 'Sass']:
-                    tech_stack.append({
-                        "name": "HTML/CSS",
-                        "color": color_map.get('HTML', 'orange')
-                    })
-                    break
-        
-        # 确保返回的技术栈不超过10个
-        if len(tech_stack) > 10:
-            tech_stack = tech_stack[:10]
-        
-        # 更新缓存
+
+        tech_stack = tech_stack[:10]
         cached_tech_stack = tech_stack
         cached_timestamp = time.time()
-        
         print(f"分析完成的技术栈: {[tech['name'] for tech in tech_stack]}")
         return tech_stack
-    except Exception as e:
-        print(f"分析技术栈时发生异常: {e}")
-        # 发生错误时返回默认技术栈
-        return [
-            {"name": "Python", "color": "blue"},
-            {"name": "JavaScript", "color": "yellow"},
-            {"name": "HTML/CSS", "color": "orange"},
-            {"name": "Flask", "color": "green"}
-        ]
+    except Exception as exc:  # noqa: BLE001
+        print(f"分析技术栈时发生异常: {exc}")
+        return _fallback_user_info()['tech_stack']
 
-# 获取同名仓库的 README","}]}}}
+
 def get_readme_content(username):
-    try:
-        print(f"尝试获取GitHub同名仓库README: {username}/{username}")
-        # 配置requests不验证SSL证书（解决本地环境中的证书验证问题）
-        import ssl
-        ssl._create_default_https_context = ssl._create_unverified_context
-        
-        # 尝试获取同名仓库的 README（main分支）
-        readme_url_main = f'https://raw.githubusercontent.com/{username}/{username}/main/README.md'
-        print(f"尝试获取README URL (main): {readme_url_main}")
-        readme_response = requests.get(readme_url_main, timeout=5, verify=False)
-        print(f"README响应状态码 (main): {readme_response.status_code}")
-        
-        if readme_response.status_code == 200:
-            print("成功获取main分支的README")
-            # 将 Markdown 转换为 HTML
-            return markdown.markdown(readme_response.text)
-        
-        # 尝试其他分支（master）
-        readme_url_master = f'https://raw.githubusercontent.com/{username}/{username}/master/README.md'
-        print(f"尝试获取README URL (master): {readme_url_master}")
-        readme_response = requests.get(readme_url_master, timeout=5, verify=False)
-        print(f"README响应状态码 (master): {readme_response.status_code}")
-        
-        if readme_response.status_code == 200:
-            print("成功获取master分支的README")
-            return markdown.markdown(readme_response.text)
-        
-        print(f"GitHub README获取失败，状态码: {readme_response.status_code}")
-    except Exception as e:
-        print(f"GitHub README获取异常: {type(e).__name__}: {str(e)}")
-    
-    # 如果获取失败，读取本地文件
-    print("使用本地README文件")
+    """优先获取 GitHub 同名仓库的 README，失败时回退到本地介绍文件。"""
+    for branch in ('main', 'master'):
+        url = f'https://raw.githubusercontent.com/{username}/{username}/{branch}/README.md'
+        try:
+            response = requests.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                verify=os.environ.get('GITHUB_INSECURE') != '1',
+                headers={'User-Agent': 'qhlqy-homepage'},
+            )
+        except requests.RequestException as exc:
+            print(f"获取 README 异常: {exc}")
+            continue
+
+        if response.status_code == 200:
+            return markdown.markdown(response.text)
+
+    print("GitHub README 获取失败，使用本地介绍文件")
     return get_local_readme()
 
-# 读取本地 README 文件
+
 def get_local_readme():
+    """读取本地 Markdown 介绍文件并转换为 HTML。"""
+    introduction_file = config.get('introduction_file', 'Introduction.md')
+    path = introduction_file
+    if not os.path.isabs(path):
+        path = os.path.join(BASE_DIR, path)
+
     try:
-        introduction_file = config.get('introduction_file', 'Introduction.md')
-        if os.path.exists(introduction_file):
-            with open(introduction_file, 'r', encoding='utf-8') as f:
-                return markdown.markdown(f.read())
-    except Exception:
-        pass
-    
-    # 如果都没有，返回默认信息
-    return "<p>这个人很懒，什么都没有留下～</p>"
+        with open(path, 'r', encoding='utf-8') as f:
+            return markdown.markdown(f.read())
+    except OSError:
+        return "<p>这个人很懒，什么都没有留下～</p>"
+
 
 @app.route('/')
 def index():
     github_info = get_github_user_info()
-    
-    # 检查背景图片是否存在
-    background_image = config.get('background', {}).get('image', 'background.png')
-    
-    # 构建完整的背景图片路径 - 检查多个可能的位置
-    possible_paths = [
-        os.path.join(os.getcwd(), background_image),  # 当前目录
-        os.path.join(os.getcwd(), 'static', background_image)  # static目录
-    ]
-    
+
+    background_image = config.get('background', {}).get('image', 'background.jpg')
     background_exists = False
-    background_path = background_image  # 默认使用配置中的路径
-    
-    # 检查哪个路径是有效的
-    for path in possible_paths:
+    background_path = background_image
+
+    for path, public_path in (
+        (os.path.join(BASE_DIR, background_image), background_image),
+        (os.path.join(BASE_DIR, 'static', background_image), f'/static/{background_image}'),
+    ):
         if os.path.exists(path):
             background_exists = True
-            # 如果找到图片，使用相对路径供模板使用
-            if 'static' in path:
-                background_path = f'/static/{background_image}'
+            background_path = public_path
             break
-    
-    print(f"背景图片配置: {background_image}")
-    print(f"背景图片存在: {background_exists}")
-    print(f"使用的背景图片路径: {background_path}")
-    
-    return render_template('index.html', 
-                          github_info=github_info, 
-                          config=config,
-                          now=datetime.now(),
-                          background_exists=background_exists,
-                          background_path=background_path)
+
+    return render_template(
+        'index.html',
+        github_info=github_info,
+        config=config,
+        now=datetime.now(),
+        background_exists=background_exists,
+        background_path=background_path,
+    )
+
 
 @app.route('/api/config')
 def get_config():
     return jsonify(config)
 
-# 提供根目录下的静态文件访问
+
 @app.route('/<path:filename>')
 def serve_root_file(filename):
-    # 只允许访问特定的文件类型
-    allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.css', '.js'}
-    file_ext = os.path.splitext(filename)[1].lower()
-    
-    if file_ext in allowed_extensions:
-        try:
-            return send_from_directory(os.getcwd(), filename)
-        except FileNotFoundError:
-            abort(404)
-    
-    # 对于不允许的文件类型，返回404
-    abort(404)
+    """提供根目录下的图片、样式与脚本等静态资源。"""
+    allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.ico', '.css', '.js'}
+    if os.path.splitext(filename)[1].lower() not in allowed_extensions:
+        abort(404)
 
-def generate_static_html():
-    """
-    生成静态HTML文件，用于部署到GitHub Pages
-    """
-    print("开始生成静态HTML文件...")
-    
-    # 创建静态文件目录
-    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static_build')
-    if not os.path.exists(static_dir):
-        os.makedirs(static_dir)
-    else:
-        # 清空目录中的所有文件
-        for file in os.listdir(static_dir):
-            file_path = os.path.join(static_dir, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-    
     try:
-        # 确保配置已加载
-        if 'config' not in globals():
-            print("加载配置文件...")
-            try:
-                with open('config.json', 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-            except FileNotFoundError:
-                # 默认配置
-                config = {
-                    "github_url": "https://github.com/example",
-                    "dark_mode": "auto",
-                    "name": "Example User",
-                    "bio": "Python Developer",
-                    "introduction_file": "Introduction.md",
-                    "github_token": "",
-                    "theme": {
-                        "primary_color": "#6a11cb",
-                        "secondary_color": "#2575fc"
-                    },
-                    "background": {
-                        "image": "background.png",
-                        "blur": 8,
-                        "overlay_opacity": 0.6,
-                        "overlay_color": "#121212"
-                    }
-                }
-        
-        # 读取介绍内容
-        introduction_content = ""
-        if 'introduction_file' in config and os.path.exists(config['introduction_file']):
-            try:
-                with open(config['introduction_file'], 'r', encoding='utf-8') as f:
-                    introduction_content = f.read()
-                # 转换Markdown为HTML
-                introduction_content = markdown.markdown(introduction_content)
-            except Exception as e:
-                print(f"警告：无法读取或解析介绍文件: {e}")
-        
-        # 创建一个临时的Jinja2环境来渲染模板
-        template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
-        env = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(template_dir),
-            autoescape=jinja2.select_autoescape(['html', 'xml'])
-        )
-        
-        # 获取模板
-        template = env.get_template('index.html')
-        
-        # 准备渲染参数
-        render_args = {
-            'config': config,
-            'introduction_content': introduction_content,
-            'tech_stack': [],  # 由于没有GitHub数据，这里使用空列表
-            'activity_data': [],  # 由于没有GitHub数据，这里使用空列表
-            'error_message': None,
-            'github_info': {
-                'name': config.get('name', 'Example User'),
-                'bio': config.get('bio', ''),
-                'avatar_url': 'https://avatars.githubusercontent.com/u/10000000?v=4',  # 默认头像
-                'html_url': config.get('github_url', 'https://github.com/example'),
-                'public_repos': 0,
-                'followers': 0,
-                'activity_data': []  # 添加可序列化的activity_data键
-            },
-            'now': datetime.now()  # 添加当前时间对象，用于显示年份
-        }
-        
-        # 渲染模板
-        print("渲染HTML模板...")
-        html_content = template.render(**render_args)
-        
-        # 保存HTML文件
-        html_path = os.path.join(static_dir, 'index.html')
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        print(f"静态HTML文件已保存到: {html_path}")
-        
-        # 复制必要的静态资源
-        resources_to_copy = []
-        # 检查是否有背景图片
-        if 'background' in config and 'image' in config['background']:
-            background_image = config['background']['image']
-            if os.path.exists(background_image):
-                resources_to_copy.append(background_image)
-        
-        # 检查一些常见的资源文件
-        for file in ['background.jpg', '1background.jpg', 'favicon.ico']:
-            if os.path.exists(file):
-                resources_to_copy.append(file)
-        
-        # 复制资源文件
-        for resource in resources_to_copy:
-            try:
-                dst = os.path.join(static_dir, os.path.basename(resource))
-                shutil.copy(resource, dst)
-                print(f"已复制资源文件: {resource}")
-            except Exception as e:
-                print(f"警告：无法复制资源文件 {resource}: {e}")
-        
-        print("\n静态文件生成成功！")
-        print(f"\n如何部署到GitHub Pages:")
-        print("1. 进入static_build目录")
-        print("2. 初始化git仓库（如果尚未初始化）")
-        print("3. 添加并提交所有文件")
-        print("4. 将文件推送到GitHub仓库的gh-pages分支")
-        print("\n示例命令：")
-        print("cd static_build")
-        print("git init")
-        print("git add .")
-        print("git commit -m 'Deploy to GitHub Pages'")
-        print("git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git")
-        print("git push -f origin master:gh-pages")
-        print("\n注意：您需要替换YOUR_USERNAME和YOUR_REPO为您的GitHub用户名和仓库名。")
-        
-    except Exception as e:
-        print(f"错误：生成静态文件失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
-    return True
+        return send_from_directory(BASE_DIR, filename)
+    except FileNotFoundError:
+        abort(404)
 
 
 if __name__ == '__main__':
-    # 检查是否需要生成静态HTML
-    if len(sys.argv) > 1 and sys.argv[1] == 'generate_static':
-        generate_static_html()
-    else:
-        # 设置环境变量，使得 GitHub Pages 能够正确运行
-        os.environ['FLASK_APP'] = 'app.py'
-        # 在开发环境中运行
-        app.run(debug=True, host='0.0.0.0', port=5000)
+    debug = os.environ.get('FLASK_DEBUG', '0') == '1'
+    app.run(
+        debug=debug,
+        host=os.environ.get('HOST', '0.0.0.0'),
+        port=int(os.environ.get('PORT', '5000')),
+    )

@@ -1,23 +1,22 @@
-# GitHub Actions workflow for building and deploying to GitHub Pages
+# 构建并部署静态站点到 GitHub Pages
 name: Build and Deploy to GitHub Pages
 
 on:
-  # 每天定时运行（UTC时间0点，北京时间8点）
+  # 每天定时构建（UTC 0 点，北京时间 8 点），保持 GitHub 统计数据更新
   schedule:
     - cron: '0 0 * * *'
   # 允许手动触发
   workflow_dispatch:
-  # 当推送到主分支时触发
+  # 推送到主分支时触发
   push:
-    branches: ['main', 'master']
+    branches: ['main']
 
-# 设置权限
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# 并发控制：允许同时进行一个部署，不取消进行中的运行
+# 同一时间只运行一个部署，且不取消进行中的部署
 concurrency:
   group: 'pages'
   cancel-in-progress: false
@@ -29,41 +28,33 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # 1. 检出代码库
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. 设置Python环境
       - name: Set up Python
-        uses: actions/setup-python@v6.0.0
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10.9'
+          python-version: '3.12'
 
-      # 3. 安装项目依赖
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4. 运行构建脚本生成静态文件
-      - name: Generate static files
+      - name: Build static site
+        env:
+          # 使用 Actions 自带令牌，避免匿名访问触发 GitHub API 速率限制
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build_static.py
 
-      # 5. 创建输出目录
-      - name: Prepare output directory
-        run: mkdir -p output && cp index.html background.jpg output/
-
-      # 6. 设置GitHub Pages
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      # 7. 上传构建产物
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './output'
+          path: ./output
 
-      # 8. 部署到GitHub Pages
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

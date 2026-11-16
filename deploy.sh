@@ -51,12 +51,12 @@ run_dev() {
 build_static() {
     echo -e "${GREEN}正在构建静态文件...${NC}"
     
-    # 直接运行build_static.py脚本，静态HTML将生成在项目根目录
+    # 静态文件生成到 output/ 目录
     python build_static.py
-    
+
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}静态文件构建完成！HTML文件已生成在项目根目录。${NC}"
-        echo -e "${YELLOW}注意：您可以直接将index.html等文件推送到GitHub Pages或其他静态站点托管服务。${NC}"
+        echo -e "${GREEN}静态文件构建完成！产物位于 output/ 目录。${NC}"
+        echo -e "${YELLOW}GitHub Actions 会自动构建并发布该目录，也可手动上传到任意静态托管服务。${NC}"
     else
         echo -e "${RED}静态文件构建失败，请检查错误信息。${NC}"
         exit 1
@@ -76,10 +76,8 @@ deploy_gh_pages() {
     echo "   - 也可以在GitHub仓库的Actions页面手动触发运行"
     echo ""
     echo "方法二：手动部署静态文件"
-    echo "   - 运行 './deploy.sh build' 生成静态文件（HTML将直接生成在项目根目录）"
-    echo "   - 添加生成的文件: git add index.html background.jpg"
-    echo "   - 提交更改: git commit -m 'Update static website'"
-    echo "   - 推送到gh-pages分支: git push origin master:gh-pages"
+    echo "   - 运行 './deploy.sh build' 生成 output/ 目录"
+    echo "   - 将 output/ 中的文件上传到任意静态托管服务"
     echo ""
     echo "方法三：使用 Vercel、Netlify 等平台部署"
     echo "   - 注册 Vercel 或 Netlify 账号"
